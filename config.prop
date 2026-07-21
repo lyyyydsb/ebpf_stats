@@ -1,0 +1,17 @@
+# 默认用户（scope 只写包名时生效）；空=全部
+ALLOWED_USERS=0
+
+# 发现进程轮询秒
+POLL_SEC=3
+
+# connect 探针
+ENABLE_CONN=1
+
+# 临终探针（部分机 tgkill 乱码，默认关）
+ENABLE_DEATH=0
+
+# 噪音路径
+LOG_NOISE=0
+
+PROBE_PREFIX=es_
+MAX_EVENTS=500000

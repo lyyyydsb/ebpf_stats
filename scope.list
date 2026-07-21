@@ -1,0 +1,4 @@
+# 一行一个；支持 包名 或 包名:用户
+# 例:
+# com.taobao.taobao:0
+# com.tencent.mm:999

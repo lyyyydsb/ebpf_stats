@@ -1,0 +1,6 @@
+id=ebpf_stats
+name=eBPF Stats + EnvProbe
+version=v1.5.2
+versionCode=152
+author=aether
+description=作用域 App kprobe 统计(compact 风险明细+业务合并) + 自动安装 EnvProbe 联动复扫。数据在模块 ebpf_statistics/。

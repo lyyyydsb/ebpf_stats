@@ -1,0 +1,12 @@
+*.apk
+!apk/EnvProbe.apk
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+run/*
+!run/.keep
+ebpf_statistics/*
+!ebpf_statistics/.keep
+*.log
