@@ -1,6 +1,6 @@
 # eBPF Stats + EnvProbe
 
-KernelSU / Magisk 模块：对 `scope.list` 内 App 做 kprobe 文件/Socket 统计，按包名会话落盘；自动安装 **EnvProbe**，用普通 App 身份复扫风险路径是否仍可见。
+KernelSU / Magisk 模块：对 `scope.list` 内 App 做 kprobe 文件/Socket 统计，按包名会话落盘；自动安装 **EnvProbe**，逐项复扫目标实际访问的外部路径是否可见。
 
 ## 安装
 
@@ -15,9 +15,11 @@ KernelSU / Magisk 模块：对 `scope.list` 内 App 做 kprobe 文件/Socket 统
 /data/adb/modules/ebpf_stats/
   scope.list / config.prop / scripts/
   ebpf_statistics/<包>_u0/session_*/
-    events_risk.log   # 风险事件全文
-    biz_counts.txt    # 业务路径合并计数
+    events_risk.log   # 外部路径事件（兼容旧文件名）
+    biz_counts.txt    # 自身私有路径合并计数
+    paths_external.txt # 实际探测的全部外部路径
     paths_risk.txt    # 过滤后的风险路径
+    unique_external.txt
     unique_risk.txt   # 路径频次
     socks.txt         # root 相关 socket
     summary.txt       # 汇总
@@ -34,12 +36,17 @@ su 0 sh /data/adb/modules/ebpf_stats/scripts/ctl.sh push
 su 0 sh /data/adb/modules/ebpf_stats/scripts/ctl.sh restart
 ```
 
-## 暴露列表含义
+## 路径状态含义
 
-模块 kprobe 记到的风险路径，再用 EnvProbe 以普通 App 身份 `exists()` 复扫仍可见的项。
+模块排除目标自身 `/proc` 和私有目录后生成 `paths_external.txt`。EnvProbe 对每条路径执行 `exists()`：
+
+- `可见`：`exists=true`
+- `不可见`：`exists=false`
+- `环境特征`：可见路径同时命中 su/Magisk/KSU/LSPosed 等特征词
 
 ## 版本
 
+- v1.5.3：按目标实际外部路径全量复扫；按软件分组；软件、可见列表、不可见列表均可独立折叠
 - v1.5.2：修复 Windows zip 反斜杠路径；修复 summary 半截；修复 EnvProbe push 源路径
 
 ## 限制

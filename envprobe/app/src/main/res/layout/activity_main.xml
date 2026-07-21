@@ -53,24 +53,11 @@
         android:fillViewport="true"
         android:scrollbars="vertical">
 
-        <HorizontalScrollView
+        <LinearLayout
+            android:id="@+id/resultsContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:fillViewport="true"
-            android:scrollbars="horizontal">
-
-            <TextView
-                android:id="@+id/tvResult"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:breakStrategy="simple"
-                android:hyphenationFrequency="none"
-                android:lineSpacingExtra="3dp"
-                android:paddingBottom="24dp"
-                android:textColor="#222222"
-                android:textIsSelectable="true"
-                android:textSize="13sp"
-                android:typeface="normal" />
-        </HorizontalScrollView>
+            android:orientation="vertical"
+            android:paddingBottom="24dp" />
     </ScrollView>
 </LinearLayout>

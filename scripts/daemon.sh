@@ -216,7 +216,7 @@ start_session() {
     echo "package=$pkg"
     echo "user=$user"
     echo "pids=$pids"
-    echo "format=compact_v2 risk_full+biz_count"
+    echo "format=compact_v3 external_full+own_count"
   } > "$sess/events_risk.log"
   # 兼容旧字段名：events.log 作为风险日志的软说明
   echo "see events_risk.log (compact)" > "$sess/events.log"
@@ -247,14 +247,15 @@ filter_risk_paths() {
   | sort -u
 }
 
-# 推给 EnvProbe：按包名隔开，只推风险路径
-# from_module/by_pkg/<pkg>_u<user>/{paths_risk.txt,meta.txt}
+# 推给 EnvProbe：按包名隔开，推目标实际探测的外部路径和风险子集
+# from_module/by_pkg/<pkg>_u<user>/{paths_external.txt,paths_risk.txt,meta.txt}
 # from_module/index.txt  一行一个 pkg_uN
 push_to_envprobe() {
   src_pkg="$1"
   user="$2"
   sess="$3"
-  paths_file="$4"
+  external_file="$4"
+  risk_file="$5"
 
   EP_PKG="com.envprobe"
   ep_files="/data/user/${user}/${EP_PKG}/files"
@@ -271,13 +272,12 @@ push_to_envprobe() {
   pkgdir="$base/by_pkg/$key"
   mkdir -p "$pkgdir" 2>/dev/null || return 0
 
+  extf="$pkgdir/paths_external.txt"
   riskf="$pkgdir/paths_risk.txt"
-  : > "$riskf"
-  if [ -f "$paths_file" ]; then
-    filter_risk_paths < "$paths_file" > "$riskf"
-  fi
-  nrisk=$(wc -l < "$riskf" 2>/dev/null || echo 0)
-  nall=$(wc -l < "$paths_file" 2>/dev/null || echo 0)
+  [ -f "$external_file" ] && cp -f "$external_file" "$extf" || : > "$extf"
+  [ -f "$risk_file" ] && cp -f "$risk_file" "$riskf" || filter_risk_paths < "$extf" > "$riskf"
+  nrisk=$(awk 'END{print NR+0}' "$riskf" 2>/dev/null)
+  nall=$(awk 'END{print NR+0}' "$extf" 2>/dev/null)
 
   {
     echo "source_package=$src_pkg"
@@ -285,7 +285,7 @@ push_to_envprobe() {
     echo "key=$key"
     echo "session=$sess"
     echo "exported=$(date)"
-    echo "paths_total=$nall"
+    echo "paths_external=$nall"
     echo "paths_risk=$nrisk"
   } > "$pkgdir/meta.txt"
 
@@ -296,6 +296,7 @@ push_to_envprobe() {
 
   # 最近一次
   echo "$key" > "$base/latest_key.txt"
+  cp -f "$extf" "$base/latest_paths_external.txt" 2>/dev/null
   cp -f "$riskf" "$base/latest_paths_risk.txt" 2>/dev/null
   cp -f "$pkgdir/meta.txt" "$base/latest_meta.txt" 2>/dev/null
 
@@ -313,25 +314,58 @@ gen_session_stats() {
   [ -f "$risklog" ] || risklog="$sess/events.log"
   bizf="$sess/biz_counts.txt"
   uniqf="$sess/unique_risk.txt"
+  uniqextf="$sess/unique_external.txt"
   sockf="$sess/socks.txt"
   sumf="$sess/summary.txt"
+  extpathsf="$sess/paths_external.txt"
   pathsf="$sess/paths_risk.txt"
   sdir=$(dirname "$sess")
 
-  # 风险路径列表（给 EnvProbe）
+  # 目标实际访问的外部路径：排除自身私有目录和自身 /proc 进程路径
+  : > "$extpathsf"
+  if [ -f "$risklog" ]; then
+    awk -v pkg="$pkg" -v user="$user" '
+    function own(p) {
+      if (p ~ /^\/proc\/(self|thread-self)(\/|$)/) return 1
+      if (p ~ ("^/data/(data|user/" user "|user_de/" user ")/" pkg "(/|$)")) return 1
+      if (p ~ ("^/(storage/emulated/" user "|sdcard)/Android/(data|media|obb)/" pkg "(/|$)")) return 1
+      if (p ~ ("^/mnt/user/" user "/[^/]+/Android/(data|media|obb)/" pkg "(/|$)")) return 1
+      if (p ~ /^\/data\/app\// && index(p, "/" pkg "-") > 0) return 1
+      if (p ~ /^\/data\/misc\/apexdata\/com\.android\.art\/dalvik-cache\// && index(p, "@" pkg "@") > 0) return 1
+      return 0
+    }
+    /^pids=/ {
+      line=$0
+      sub(/^pids=/, "", line)
+      count=split(line, ids, " ")
+      for (j=1;j<=count;j++) if (ids[j] ~ /^[0-9]+$/) ownpid[ids[j]]=1
+      next
+    }
+    {
+      for(i=1;i<=NF;i++) if($i~/^\//) {
+        p=$i
+        if (match(p, /^\/proc\/[0-9]+/)) {
+          id=substr(p, 7, RLENGTH-6)
+          if (id in ownpid) continue
+        }
+        if (!own(p)) print p
+      }
+    }' "$risklog" | sort -u > "$extpathsf"
+  fi
+
+  # 风险路径仅作为外部路径的关键字子集保留
   : > "$pathsf"
-  [ -f "$risklog" ] && awk '{for(i=1;i<=NF;i++) if($i~/^\//) print $i}' "$risklog" \
-    | sort -u >> "$pathsf"
-  # 再滤一层
-  if [ -s "$pathsf" ]; then
+  if [ -s "$extpathsf" ]; then
     tmp="$pathsf.tmp"
-    filter_risk_paths < "$pathsf" > "$tmp" 2>/dev/null
+    filter_risk_paths < "$extpathsf" > "$tmp" 2>/dev/null
     mv "$tmp" "$pathsf"
   fi
 
+  echo "=== 外部路径去重 $(date) ===" > "$uniqextf"
+  sed 's/^/      1 /' "$extpathsf" >> "$uniqextf"
+
   echo "=== 风险路径去重 $(date) ===" > "$uniqf"
-  [ -f "$risklog" ] && awk '{for(i=1;i<=NF;i++) if($i~/^\//||$i~/^@/) print $i}' "$risklog" \
-    | sort | uniq -c | sort -rn >> "$uniqf"
+  sed 's/^/      1 /' "$pathsf" >> "$uniqf"
 
   echo "=== Socket ===" > "$sockf"
   # 普通 CONN 在 biz_counts；仅 root 相关 socket 进 risklog
@@ -346,7 +380,7 @@ gen_session_stats() {
   fi
 
   # 禁止 grep -c||echo0：0 匹配时会得到 "0\n0" 弄崩 $(( ))
-  nstat=0; nacc=0; nopen=0; nconn=0; nmaps=0; nroot=0; nrisk=0
+  nstat=0; nacc=0; nopen=0; nconn=0; nmaps=0; nroot=0; nrisk=0; nexternal=0
   if [ -f "$risklog" ]; then
     nstat=$(awk 'BEGIN{c=0} /\[STAT\]/{c++} END{print c+0}' "$risklog")
     nacc=$(awk 'BEGIN{c=0} /\[ACCESS\]/{c++} END{print c+0}' "$risklog")
@@ -356,6 +390,7 @@ gen_session_stats() {
     nroot=$(awk 'BEGIN{c=0} /ROOT/{c++} END{print c+0}' "$risklog")
   fi
   [ -f "$pathsf" ] && nrisk=$(awk 'END{print NR+0}' "$pathsf")
+  [ -f "$extpathsf" ] && nexternal=$(awk 'END{print NR+0}' "$extpathsf")
   # 业务侧合计
   biz_open=0; biz_stat=0; biz_acc=0; biz_conn=0; biz_other=0
   if [ -f "$bizf" ]; then
@@ -371,12 +406,12 @@ gen_session_stats() {
   {
     echo "package=$pkg user=$user"
     echo "ended=$(date)"
-    echo "format=compact_v2"
+    echo "format=compact_v3"
     echo "session_dir=$sess"
     echo "events_total=$events"
     echo "risk_lines=$risk_lines"
     echo "RISK_OPEN=$nopen RISK_STAT=$nstat RISK_ACCESS=$nacc RISK_CONN=$nconn"
-    echo "risk_paths=$nrisk maps=$nmaps root_marks=$nroot"
+    echo "external_paths=$nexternal risk_paths=$nrisk maps=$nmaps root_marks=$nroot"
     echo "BIZ_OPEN=$biz_open BIZ_STAT=$biz_stat BIZ_ACCESS=$biz_acc BIZ_CONN=$biz_conn BIZ_OTHER=$biz_other BIZ_TOTAL=$biz_total"
     echo "--- 风险路径 TOP ---"
     sed -n '1,50p' "$uniqf"
@@ -384,9 +419,11 @@ gen_session_stats() {
     sed -n '1,20p' "$sockf"
     echo "--- 文件说明 ---"
     echo "本目录: $sess"
-    echo "  events_risk.log  风险事件全文"
-    echo "  biz_counts.txt   业务路径按类型计数"
+    echo "  events_risk.log  外部路径事件（兼容旧文件名）"
+    echo "  biz_counts.txt   自身私有路径按类型计数"
+    echo "  paths_external.txt 目标实际探测的全部外部路径"
     echo "  paths_risk.txt   过滤后的风险路径(给 EnvProbe)"
+    echo "  unique_external.txt 外部路径去重"
     echo "  unique_risk.txt  风险日志路径频次"
     echo "  socks.txt        root 相关 socket + 业务 CONN 计数"
     echo "  summary.txt      本文件"
@@ -395,11 +432,13 @@ gen_session_stats() {
   } > "$sumf"
 
   cp -f "$sumf" "$sdir/latest_summary.txt" 2>/dev/null
+  cp -f "$uniqextf" "$sdir/latest_unique_external.txt" 2>/dev/null
   cp -f "$uniqf" "$sdir/latest_unique.txt" 2>/dev/null
+  cp -f "$extpathsf" "$sdir/latest_paths_external.txt" 2>/dev/null
   cp -f "$pathsf" "$sdir/latest_paths_risk.txt" 2>/dev/null
   cp -f "$sockf" "$sdir/latest_socks.txt" 2>/dev/null
 
-  push_to_envprobe "$pkg" "$user" "$sess" "$pathsf"
+  push_to_envprobe "$pkg" "$user" "$sess" "$extpathsf" "$pathsf"
 }
 
 stop_session() {
@@ -587,9 +626,9 @@ drain_trace() {
     dlog "drain try#$DRAIN_N chunk=${sz}B es=$(grep -c "$PROBE_PREFIX" "$RUN_DIR/trace.chunk" 2>/dev/null)"
   fi
 
-  # compact_v2:
-  # - 风险事件 → events_risk.log（全文）
-  # - 业务事件 → 只按 OPEN/STAT/ACCESS 累加到 biz_counts.txt（合并，不丢次数）
+  # compact_v3:
+  # - 外部路径事件 → events_risk.log（保留旧文件名兼容）
+  # - 自身私有路径 → 只按 OPEN/STAT/ACCESS 累加到 biz_counts.txt
   wrote=$(awk -v P="$PROBE_PREFIX" -v tidmap="$RUN_DIR/tidmap" -v rundir="$RUN_DIR" -v noise="$LOG_NOISE" '
   BEGIN {
     while ((getline L < tidmap) > 0) {
@@ -606,10 +645,17 @@ drain_trace() {
     if (p ~ /libriruloader|XposedBridge/) return 1
     return 0
   }
-  function is_biz_path(p) {
-    if (p ~ /^\/data\/user\//) return 1
-    if (p ~ /^\/data\/data\//) return 1
-    if (p ~ /^\/storage\// || p ~ /^\/sdcard\//) return 1
+  function is_own_path(p, target_pkg, target_user) {
+    if (p ~ /^\/proc\/(self|thread-self)(\/|$)/) return 1
+    if (match(p, /^\/proc\/[0-9]+/)) {
+      procid=substr(p, 7, RLENGTH-6)
+      if ((procid in pkg) && pkg[procid] == target_pkg) return 1
+    }
+    if (p ~ ("^/data/(data|user/" target_user "|user_de/" target_user ")/" target_pkg "(/|$)")) return 1
+    if (p ~ ("^/(storage/emulated/" target_user "|sdcard)/Android/(data|media|obb)/" target_pkg "(/|$)")) return 1
+    if (p ~ ("^/mnt/user/" target_user "/[^/]+/Android/(data|media|obb)/" target_pkg "(/|$)")) return 1
+    if (p ~ /^\/data\/app\// && index(p, "/" target_pkg "-") > 0) return 1
+    if (p ~ /^\/data\/misc\/apexdata\/com\.android\.art\/dalvik-cache\// && index(p, "@" target_pkg "@") > 0) return 1
     return 0
   }
   index($0, P) == 0 { next }
@@ -682,6 +728,13 @@ drain_trace() {
       if (path=="/dev/null" || path=="/dev/urandom" || path=="/dev/zero") next
     }
 
+    if (is_own_path(path, pkg[pid], user[pid])) {
+      if (op=="OPEN" || op=="STAT" || op=="ACCESS") biz[key SUBSEP op]++
+      else biz[key SUBSEP "OTHER"]++
+      n[key]++
+      next
+    }
+
     risk = is_risk_path(path)
     mark=""
     if (path ~ /data\/adb|magisk|\/ksu|\/modules|frida|xposed|lsposed|busybox|lspd/) mark=" <!!ROOT>"
@@ -694,10 +747,6 @@ drain_trace() {
       print "[" ts "][" op "] " comm "  " path mark >> riskf[key]
       n[key]++
       nrisk[key]++
-    } else if (is_biz_path(path)) {
-      if (op=="OPEN" || op=="STAT" || op=="ACCESS") biz[key SUBSEP op]++
-      else biz[key SUBSEP "OTHER"]++
-      n[key]++
     } else {
       # 其它系统路径：标 SYS 写入风险日志（量不大）
       if (mark=="") mark=" <*SYS>"

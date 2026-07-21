@@ -25,16 +25,11 @@ filter_risk() {
 push_one() {
   sess="$1"
   [ -d "$sess" ] || return 1
-  # 正确源：paths_risk.txt / events_risk.log（不是旧的 paths.txt + events.log）
+  # 优先推全部外部路径；旧 session 回退到风险路径
+  external="$sess/paths_external.txt"
   paths="$sess/paths_risk.txt"
   risklog="$sess/events_risk.log"
   [ -f "$risklog" ] || risklog="$sess/events.log"
-  if [ ! -s "$paths" ] && [ -f "$risklog" ]; then
-    awk '{for(i=1;i<=NF;i++) if($i~/^\//) print $i}' "$risklog" 2>/dev/null | sort -u > "$sess/paths_all.tmp"
-    filter_risk < "$sess/paths_all.tmp" > "$paths"
-    rm -f "$sess/paths_all.tmp"
-  fi
-  [ -f "$paths" ] || : > "$paths"
 
   pkg=$(grep '^package=' "$risklog" 2>/dev/null | head -1 | cut -d= -f2)
   [ -z "$pkg" ] && pkg=$(basename "$(dirname "$sess")" | sed 's/_u[0-9]*$//')
@@ -42,6 +37,40 @@ push_one() {
   case "$user" in *[!0-9]*) user=0 ;; esac
   [ -z "$user" ] && user=0
   key="${pkg}_u${user}"
+
+  if [ ! -s "$external" ] && [ -f "$risklog" ]; then
+    awk -v pkg="$pkg" -v user="$user" '
+    function own(p) {
+      if (p ~ /^\/proc\/(self|thread-self)(\/|$)/) return 1
+      if (p ~ ("^/data/(data|user/" user "|user_de/" user ")/" pkg "(/|$)")) return 1
+      if (p ~ ("^/(storage/emulated/" user "|sdcard)/Android/(data|media|obb)/" pkg "(/|$)")) return 1
+      if (p ~ /^\/data\/app\// && index(p, "/" pkg "-") > 0) return 1
+      if (p ~ /^\/data\/misc\/apexdata\/com\.android\.art\/dalvik-cache\// && index(p, "@" pkg "@") > 0) return 1
+      return 0
+    }
+    /^pids=/ {
+      line=$0; sub(/^pids=/, "", line); count=split(line, ids, " ")
+      for (j=1;j<=count;j++) if (ids[j] ~ /^[0-9]+$/) ownpid[ids[j]]=1
+      next
+    }
+    {
+      for(i=1;i<=NF;i++) if($i~/^\//) {
+        p=$i
+        if (match(p, /^\/proc\/[0-9]+/)) {
+          id=substr(p, 7, RLENGTH-6)
+          if (id in ownpid) continue
+        }
+        if (!own(p)) print p
+      }
+    }' "$risklog" 2>/dev/null | sort -u > "$external"
+  fi
+  if [ ! -s "$paths" ] && [ -f "$risklog" ]; then
+    awk '{for(i=1;i<=NF;i++) if($i~/^\//) print $i}' "$risklog" 2>/dev/null | sort -u > "$sess/paths_all.tmp"
+    filter_risk < "$sess/paths_all.tmp" > "$paths"
+    rm -f "$sess/paths_all.tmp"
+  fi
+  [ -f "$paths" ] || : > "$paths"
+  [ -f "$external" ] || : > "$external"
 
   EP=com.envprobe
   ep_files="/data/user/${user}/${EP}/files"
@@ -51,6 +80,7 @@ push_one() {
 
   pkgdir="$ep_files/from_module/by_pkg/$key"
   mkdir -p "$pkgdir"
+  cp -f "$external" "$pkgdir/paths_external.txt"
   # paths_risk 已是过滤结果则直接拷；否则再滤
   if [ -s "$paths" ]; then
     filter_risk < "$paths" > "$pkgdir/paths_risk.txt"
@@ -58,14 +88,14 @@ push_one() {
     : > "$pkgdir/paths_risk.txt"
   fi
   nr=$(awk 'END{print NR+0}' "$pkgdir/paths_risk.txt")
-  nall=$(awk 'END{print NR+0}' "$paths")
+  nall=$(awk 'END{print NR+0}' "$pkgdir/paths_external.txt")
   {
     echo "source_package=$pkg"
     echo "user=$user"
     echo "key=$key"
     echo "session=$sess"
     echo "exported=$(date)"
-    echo "paths_total=$nall"
+    echo "paths_external=$nall"
     echo "paths_risk=$nr"
   } > "$pkgdir/meta.txt"
 
@@ -74,6 +104,7 @@ push_one() {
   touch "$base/index.txt"
   grep -qx "$key" "$base/index.txt" 2>/dev/null || echo "$key" >> "$base/index.txt"
   echo "$key" > "$base/latest_key.txt"
+  cp -f "$pkgdir/paths_external.txt" "$base/latest_paths_external.txt"
   cp -f "$pkgdir/paths_risk.txt" "$base/latest_paths_risk.txt"
   cp -f "$pkgdir/meta.txt" "$base/latest_meta.txt"
 
