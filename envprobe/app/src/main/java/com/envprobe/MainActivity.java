@@ -504,9 +504,16 @@ public class MainActivity extends Activity {
                 || p.startsWith("/sys/fs/selinux") || p.startsWith("/data/local/tmp")
                 || p.equals("/dev/kmsg") || p.equals("/proc/kallsyms")
                 || p.equals("/proc/modules") || p.startsWith("/proc/config")
-                || p.equals("/proc/version") || p.contains("adbd_config_prop")
-                || p.contains("debug_prop") || p.contains("serialno_prop")
-                || p.contains("userdebug_or_eng_prop") || p.startsWith("/data/data/")
+                || p.equals("/proc/version") || p.equals("/proc/cpuinfo")
+                || p.equals("/proc/meminfo") || p.equals("/proc/cmdline")
+                || p.equals("/proc/bootconfig") || p.startsWith("/proc/sys/kernel/")
+                || p.startsWith("/proc/oplus_") || p.startsWith("/sys/devices/system/cpu/")
+                || p.startsWith("/sys/kernel/") || p.startsWith("/sys/module/")
+                || p.startsWith("/sys/fs/verity") || p.startsWith("/dev/block/")
+                || p.contains("vbmeta") || p.contains("dm-verity")
+                || p.startsWith("/dev/__properties__/") || p.endsWith("/build.prop")
+                || p.contains("/overlay/") || p.startsWith("/data/resource-cache/")
+                || p.startsWith("/metadata/") || p.startsWith("/data/data/")
                 || p.startsWith("/data/user/") || p.contains("/android/data/")) return 2;
         return 1;
     }
@@ -524,6 +531,14 @@ public class MainActivity extends Activity {
         if (p.contains("maps")) return "MAPS";
         if (p.contains("frida")) return "FRIDA";
         if (p.equals("/dev/kmsg")) return "KMSG";
+        if (p.startsWith("/sys/devices/system/cpu/") || p.equals("/proc/cpuinfo")) return "CPU";
+        if (p.startsWith("/sys/kernel/") || p.startsWith("/sys/module/")
+                || p.startsWith("/proc/sys/kernel/") || p.equals("/proc/version")
+                || p.equals("/proc/modules") || p.startsWith("/proc/config")) return "KERNEL";
+        if (p.contains("vbmeta") || p.contains("verity") || p.equals("/proc/cmdline")
+                || p.equals("/proc/bootconfig") || p.startsWith("/dev/block/")) return "BOOT";
+        if (p.startsWith("/dev/__properties__/") || p.endsWith("/build.prop")) return "PROP";
+        if (p.contains("/overlay/") || p.startsWith("/data/resource-cache/")) return "OVERLAY";
         if (p.startsWith("/data/data/") || p.startsWith("/data/user/")
                 || p.contains("/android/data/")) return "APP目录";
         if (p.contains("debug") || p.contains("adbd")) return "DEBUG";

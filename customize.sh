@@ -3,7 +3,7 @@
 SKIPUNZIP=0
 ui_print " "
 ui_print "********************************"
-ui_print "  eBPF Stats + EnvProbe v1.5.4"
+ui_print "  eBPF Stats + EnvProbe v1.5.5"
 ui_print "********************************"
 ui_print " "
 

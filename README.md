@@ -43,11 +43,12 @@ su 0 sh /data/adb/modules/ebpf_stats/scripts/ctl.sh restart
 - `可见`：`exists=true`
 - `不可见`：`exists=false`
 - `高风险`：明确的 su/Magisk/KSU/LSPosed/Zygisk/Frida 等路径
-- `中风险`：挂载、SELinux、调试节点、其他 App 目录等环境探针
+- `中风险`：内核/CPU/ROM、挂载、SELinux、系统属性、Overlay、其他 App 目录等环境探针
 - `低风险`：普通系统框架、字体、CPU、设备节点等，默认折叠
 
 ## 版本
 
+- v1.5.5：中风险覆盖 CPU、内核、ROM、属性、Overlay、verified boot 等组合检测信号
 - v1.5.4：可见路径按高中低风险折叠；修复误判、自身 maps 噪音和大报告分享崩溃
 - v1.5.3：按目标实际外部路径全量复扫；按软件分组；软件、可见列表、不可见列表均可独立折叠
 - v1.5.2：修复 Windows zip 反斜杠路径；修复 summary 半截；修复 EnvProbe push 源路径
