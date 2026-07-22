@@ -243,7 +243,7 @@ filter_risk_paths() {
   grep -E '^/' | grep -ivE \
     '^/data/user/|^/data/data/|^/storage/|^/sdcard/|^/mnt/|^/apex/|^/dev/ashmem|^/dev/null|^/dev/urandom|^/dev/__properties__' \
   | grep -iE \
-    'magisk|ksu|kernelsu|xposed|lsposed|lspd|frida|zygisk|riru|shamiko|tricky|busybox|data/adb|/su$|/su/|modules|selinux|/proc/mounts|/proc/self/maps|data/local/(tmp|su|bin|xbin)|/system/bin/su|/system/xbin/su|/sbin/su|libriruloader|XposedBridge' \
+    'magisk|kernelsu|(^|/)ksu(/|$)|xposed|lsposed|lspd|frida|zygisk|riru|shamiko|tricky|busybox|data/adb|/su$|/su/|selinux|/proc/mounts|/proc/self/maps|data/local/(tmp|su|bin|xbin)|/system/bin/su|/system/xbin/su|/sbin/su|libriruloader|XposedBridge' \
   | sort -u
 }
 
@@ -326,6 +326,8 @@ gen_session_stats() {
   if [ -f "$risklog" ]; then
     awk -v pkg="$pkg" -v user="$user" '
     function own(p) {
+      gsub(/\/\.\//, "/", p)
+      while (index(p, "//")) gsub(/\/\//, "/", p)
       if (p ~ /^\/proc\/(self|thread-self)(\/|$)/) return 1
       if (p ~ ("^/data/(data|user/" user "|user_de/" user ")/" pkg "(/|$)")) return 1
       if (p ~ ("^/(storage/emulated/" user "|sdcard)/Android/(data|media|obb)/" pkg "(/|$)")) return 1
@@ -638,7 +640,7 @@ drain_trace() {
     close(tidmap)
   }
   function is_risk_path(p) {
-    if (p ~ /data\/adb|magisk|\/ksu|kernelsu|\/modules|frida|xposed|lsposed|busybox|lspd|riru|shamiko|tricky/) return 1
+    if (p ~ /data\/adb|magisk|\/ksu(\/|$)|kernelsu|frida|xposed|lsposed|busybox|lspd|riru|shamiko|tricky/) return 1
     if (p ~ /\/maps$|cpu_capacity|cpuinfo_max_freq|\/system\/cpu|selinux/) return 1
     if (p ~ /\/proc\/.*\/(mounts|cmdline|status|fd\/)|\/proc\/self\/|\/proc\/mounts/) return 1
     if (p ~ /data\/local\/(tmp|su|bin|xbin)|\/system\/bin\/su|\/system\/xbin\/su|\/sbin\/su/) return 1
@@ -646,6 +648,8 @@ drain_trace() {
     return 0
   }
   function is_own_path(p, target_pkg, target_user) {
+    gsub(/\/\.\//, "/", p)
+    while (index(p, "//")) gsub(/\/\//, "/", p)
     if (p ~ /^\/proc\/(self|thread-self)(\/|$)/) return 1
     if (match(p, /^\/proc\/[0-9]+/)) {
       procid=substr(p, 7, RLENGTH-6)

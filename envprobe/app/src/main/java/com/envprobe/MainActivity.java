@@ -1,14 +1,19 @@
 package com.envprobe;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
@@ -20,7 +25,11 @@ import android.widget.Toast;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.OutputStreamWriter;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -140,7 +149,8 @@ public class MainActivity extends Activity {
                 invisible.add(line.trim());
             } else if (footer) {
                 if (!line.trim().isEmpty()) footerLines.add(line.trim());
-            } else if (title != null && !line.equals("路径明细:") && !line.trim().isEmpty()) {
+            } else if (title != null && !line.equals("路径明细:")
+                    && !line.startsWith("-- ") && !line.trim().isEmpty()) {
                 info.add(line);
             }
         }
@@ -151,6 +161,16 @@ public class MainActivity extends Activity {
 
     private void addAppCard(String title, List<String> info, List<String> visible,
                             List<String> invisible, boolean expanded) {
+        List<String> highRisk = new ArrayList<>();
+        List<String> mediumRisk = new ArrayList<>();
+        List<String> lowRisk = new ArrayList<>();
+        for (String result : visible) {
+            int level = riskLevel(pathFromResult(result));
+            if (level == 3) highRisk.add(result);
+            else if (level == 2) mediumRisk.add(result);
+            else lowRisk.add(result);
+        }
+
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(1), dp(1), dp(1), dp(1));
@@ -170,11 +190,13 @@ public class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.setPadding(dp(12), dp(11), dp(12), dp(11));
         header.setBackground(rounded(Color.rgb(32, 48, 73), 11));
-        updateToggleTitle(header, expanded, title, visible.size(), invisible.size());
+        updateToggleTitle(header, expanded, title, highRisk.size(), mediumRisk.size(),
+                lowRisk.size(), invisible.size());
         header.setOnClickListener(v -> {
             boolean show = body.getVisibility() != View.VISIBLE;
             body.setVisibility(show ? View.VISIBLE : View.GONE);
-            updateToggleTitle(header, show, title, visible.size(), invisible.size());
+            updateToggleTitle(header, show, title, highRisk.size(), mediumRisk.size(),
+                    lowRisk.size(), invisible.size());
         });
         card.addView(header);
 
@@ -183,7 +205,9 @@ public class MainActivity extends Activity {
             meta.setPadding(dp(2), 0, dp(2), dp(8));
             body.addView(meta);
         }
-        addPathSection(body, "可见", visible, Color.rgb(34, 111, 75), Color.rgb(231, 246, 237));
+        addPathSection(body, "高风险", highRisk, Color.rgb(174, 42, 42), Color.rgb(252, 232, 232));
+        addPathSection(body, "中风险", mediumRisk, Color.rgb(166, 92, 15), Color.rgb(255, 243, 220));
+        addPathSection(body, "低风险", lowRisk, Color.rgb(46, 91, 145), Color.rgb(233, 241, 251));
         addPathSection(body, "不可见", invisible, Color.rgb(76, 87, 104), Color.rgb(241, 244, 248));
         body.setVisibility(expanded ? View.VISIBLE : View.GONE);
         card.addView(body);
@@ -227,9 +251,15 @@ public class MainActivity extends Activity {
     }
 
     private void updateToggleTitle(TextView view, boolean expanded, String title,
-                                   int visible, int invisible) {
+                                   int high, int medium, int low, int invisible) {
         view.setText((expanded ? "▼ " : "▶ ") + title
-                + "\n可见 " + visible + "  ·  不可见 " + invisible);
+                + "\n高 " + high + "  ·  中 " + medium + "  ·  低 " + low
+                + "  ·  不可见 " + invisible);
+    }
+
+    private static String pathFromResult(String result) {
+        int index = result.lastIndexOf("] ");
+        return index >= 0 ? result.substring(index + 2) : result;
     }
 
     private TextView createText(String value, float size, int color) {
@@ -262,20 +292,20 @@ public class MainActivity extends Activity {
     }
 
     private static String summaryLine(String report) {
-        int apps = 0, featureHits = 0, clean = 0;
+        int apps = 0, highRiskPaths = 0, mediumRiskPaths = 0;
         for (String line : report.split("\n")) {
             if (line.startsWith("## ")) apps++;
-            if (line.startsWith("环境特征可见:")) {
+            if (line.startsWith("高风险可见:") || line.startsWith("中风险可见:")) {
                 try {
                     int n = Integer.parseInt(line.replaceAll("[^0-9]", ""));
-                    if (n > 0) featureHits++;
-                    else clean++;
+                    if (line.startsWith("高风险")) highRiskPaths += n;
+                    if (line.startsWith("中风险")) mediumRiskPaths += n;
                 } catch (Exception ignored) {
                 }
             }
         }
-        return String.format(Locale.CHINA, "软件 %d | 环境特征可见 %d | 未见环境特征 %d",
-                apps, featureHits, clean);
+        return String.format(Locale.CHINA, "软件 %d | 高风险 %d | 中风险 %d",
+                apps, highRiskPaths, mediumRiskPaths);
     }
 
     private String buildReport() {
@@ -313,7 +343,7 @@ public class MainActivity extends Activity {
             return sb.toString();
         }
 
-        int featureHitApps = 0;
+        int highRiskApps = 0;
         for (String key : keys) {
             File dir = new File(byPkg, key);
             File externalFile = new File(dir, "paths_external.txt");
@@ -337,13 +367,13 @@ public class MainActivity extends Activity {
 
             String block = scanOne(pkgName + "  (用户 u" + user + ")", metaStr,
                     paths, pkgName, user);
-            if (!block.contains("环境特征可见: 0")) featureHitApps++;
+            if (!block.contains("高风险可见: 0")) highRiskApps++;
             sb.append(block).append('\n');
         }
 
         sb.append(scanPackages());
         sb.append("\n—— 共 ").append(keys.size()).append(" 个软件，")
-                .append(featureHitApps).append(" 个存在可见环境特征 ——\n");
+                .append(highRiskApps).append(" 个存在高风险可见路径 ——\n");
         return sb.toString();
     }
 
@@ -363,10 +393,15 @@ public class MainActivity extends Activity {
         }
 
         Set<String> uniquePaths = new LinkedHashSet<>(paths);
-        List<String> results = new ArrayList<>();
+        List<String> highResults = new ArrayList<>();
+        List<String> mediumResults = new ArrayList<>();
+        List<String> lowResults = new ArrayList<>();
+        List<String> invisibleResults = new ArrayList<>();
         int visible = 0;
         int invisible = 0;
-        int visibleFeatures = 0;
+        int highRisk = 0;
+        int mediumRisk = 0;
+        int lowRisk = 0;
         int checked = 0;
         for (String path : uniquePaths) {
             if (path == null || !path.startsWith("/")) continue;
@@ -381,25 +416,40 @@ public class MainActivity extends Activity {
             }
             if (ex) {
                 visible++;
-                String tag = "";
-                if (isRisk(path)) {
-                    visibleFeatures++;
-                    tag = "[环境特征:" + riskTag(path) + "]";
-                }
-                results.add("[可见]" + tag + " " + path);
+                int level = riskLevel(path);
+                if (level == 3) highRisk++;
+                else if (level == 2) mediumRisk++;
+                else lowRisk++;
+                String levelName = level == 3 ? "高风险" : level == 2 ? "中风险" : "低风险";
+                String tag = "[" + levelName + ":" + riskTag(path) + "]";
+                String result = "[可见]" + tag + " " + path;
+                if (level == 3) highResults.add(result);
+                else if (level == 2) mediumResults.add(result);
+                else lowResults.add(result);
             } else {
                 invisible++;
-                results.add("[不可见] " + path);
+                invisibleResults.add("[不可见] " + path);
             }
         }
 
         sb.append("目标实际外部路径: ").append(checked).append('\n');
         sb.append("可见路径: ").append(visible).append("（exists=true）\n");
         sb.append("不可见路径: ").append(invisible).append("（exists=false）\n");
-        sb.append("环境特征可见: ").append(visibleFeatures).append('\n');
+        sb.append("高风险可见: ").append(highRisk).append('\n');
+        sb.append("中风险可见: ").append(mediumRisk).append('\n');
+        sb.append("低风险可见: ").append(lowRisk).append('\n');
         sb.append("路径明细:\n");
-        for (String result : results) sb.append("  ").append(result).append('\n');
+        appendResultGroup(sb, "高风险", highResults);
+        appendResultGroup(sb, "中风险", mediumResults);
+        appendResultGroup(sb, "低风险", lowResults);
+        appendResultGroup(sb, "不可见", invisibleResults);
         return sb.toString();
+    }
+
+    private static void appendResultGroup(StringBuilder report, String title,
+                                          List<String> results) {
+        report.append("-- ").append(title).append(" ").append(results.size()).append(" --\n");
+        for (String result : results) report.append("  ").append(result).append('\n');
     }
 
     private String scanPackages() {
@@ -423,6 +473,7 @@ public class MainActivity extends Activity {
     }
 
     private static boolean isOwnPath(String path, String packageName, String user) {
+        path = normalizePath(path);
         String userId = user == null || !user.matches("\\d+") ? "0" : user;
         if (path.startsWith("/proc/self/") || path.startsWith("/proc/thread-self/")) {
             return true;
@@ -440,32 +491,58 @@ public class MainActivity extends Activity {
                 || path.startsWith("/sdcard/Android/obb/" + packageName + "/");
     }
 
-    private static boolean isRisk(String path) {
-        String p = path.toLowerCase(Locale.US);
-        return p.contains("magisk") || p.contains("ksu") || p.contains("kernelsu")
+    private static int riskLevel(String path) {
+        String p = normalizePath(path).toLowerCase(Locale.US);
+        if (p.startsWith("/data/adb") || hasSegment(p, "su") || hasSegment(p, "ksu")
+                || p.contains("magisk") || p.contains("kernelsu")
+                || p.contains("me.weishu.kernelsu") || p.contains("com.topjohnwu.magisk")
                 || p.contains("xposed") || p.contains("lsposed") || p.contains("lspd")
                 || p.contains("zygisk") || p.contains("frida") || p.contains("riru")
-                || p.contains("shamiko") || p.contains("tricky")
-                || p.contains("/data/adb") || p.endsWith("/su") || p.contains("/su/")
-                || p.contains("busybox") || p.contains("modules")
-                || p.contains("selinux") || p.contains("/proc/mounts")
-                || p.contains("/proc/self/maps") || p.contains("data/local/tmp")
-                || p.contains("data/local/su") || p.contains("libriruloader");
+                || p.contains("shamiko") || p.contains("tricky") || p.contains("busybox")
+                || p.contains("libriruloader") || p.contains("xposedbridge")) return 3;
+        if (p.equals("/proc/mounts") || p.endsWith("/mountinfo") || p.endsWith("/maps")
+                || p.startsWith("/sys/fs/selinux") || p.startsWith("/data/local/tmp")
+                || p.equals("/dev/kmsg") || p.equals("/proc/kallsyms")
+                || p.equals("/proc/modules") || p.startsWith("/proc/config")
+                || p.equals("/proc/version") || p.contains("adbd_config_prop")
+                || p.contains("debug_prop") || p.contains("serialno_prop")
+                || p.contains("userdebug_or_eng_prop") || p.startsWith("/data/data/")
+                || p.startsWith("/data/user/") || p.contains("/android/data/")) return 2;
+        return 1;
     }
 
     private static String riskTag(String path) {
-        String p = path.toLowerCase(Locale.US);
-        if (p.endsWith("/su") || p.contains("/su/")) return "SU";
+        String p = normalizePath(path).toLowerCase(Locale.US);
+        if (hasSegment(p, "su")) return "SU";
         if (p.contains("magisk")) return "MAGISK";
         if (p.contains("lspd") || p.contains("lsposed") || p.contains("xposed")) return "LSP";
-        if (p.contains("ksu") || p.contains("kernelsu")) return "KSU";
+        if (hasSegment(p, "ksu") || p.contains("kernelsu")) return "KSU";
         if (p.contains("zygisk")) return "ZYGISK";
-        if (p.contains("modules") || p.contains("/data/adb")) return "ADB";
+        if (p.startsWith("/data/adb")) return "ADB";
         if (p.contains("selinux")) return "SELINUX";
         if (p.contains("mounts")) return "MOUNTS";
         if (p.contains("maps")) return "MAPS";
         if (p.contains("frida")) return "FRIDA";
-        return "RISK";
+        if (p.equals("/dev/kmsg")) return "KMSG";
+        if (p.startsWith("/data/data/") || p.startsWith("/data/user/")
+                || p.contains("/android/data/")) return "APP目录";
+        if (p.contains("debug") || p.contains("adbd")) return "DEBUG";
+        return "一般";
+    }
+
+    private static boolean hasSegment(String path, String segment) {
+        String marker = "/" + segment;
+        return path.equals(marker) || path.startsWith(marker + "/")
+                || path.endsWith(marker) || path.contains(marker + "/");
+    }
+
+    private static String normalizePath(String path) {
+        String normalized = path.replace("\u200e", "").replace("\u200f", "")
+                .replace("\u202a", "").replace("\u202b", "")
+                .replace("\u202c", "").replace("\u202d", "").replace("\u202e", "");
+        while (normalized.contains("/./")) normalized = normalized.replace("/./", "/");
+        while (normalized.contains("//")) normalized = normalized.replace("//", "/");
+        return normalized;
     }
 
     private static List<String> readLines(File f) {
@@ -503,10 +580,51 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "请先扫描", Toast.LENGTH_SHORT).show();
             return;
         }
-        Intent i = new Intent(Intent.ACTION_SEND);
-        i.setType("text/plain");
-        i.putExtra(Intent.EXTRA_SUBJECT, "EnvProbe");
-        i.putExtra(Intent.EXTRA_TEXT, lastReport);
-        startActivity(Intent.createChooser(i, "分享"));
+        Uri reportUri;
+        try {
+            reportUri = writeReportForShare();
+        } catch (Throwable error) {
+            Toast.makeText(this, "生成报告失败", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_SUBJECT, "EnvProbe");
+        intent.putExtra(Intent.EXTRA_STREAM, reportUri);
+        intent.setClipData(ClipData.newRawUri("EnvProbe 报告", reportUri));
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(intent, "分享报告文件"));
+        } catch (Throwable error) {
+            Toast.makeText(this, "没有可用的分享应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private Uri writeReportForShare() throws Exception {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME,
+                    "EnvProbe-report-" + System.currentTimeMillis() + ".txt");
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/EnvProbe");
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) throw new IllegalStateException("MediaStore insert failed");
+            try (OutputStream output = getContentResolver().openOutputStream(uri, "w");
+                 OutputStreamWriter writer = new OutputStreamWriter(output, StandardCharsets.UTF_8)) {
+                writer.write(lastReport);
+            }
+            values.clear();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            getContentResolver().update(uri, values, null, null);
+            return uri;
+        }
+        File report = new File(getCacheDir(), "envprobe-report.txt");
+        try (OutputStreamWriter writer = new OutputStreamWriter(
+                new FileOutputStream(report), StandardCharsets.UTF_8)) {
+            writer.write(lastReport);
+        }
+        return ReportProvider.REPORT_URI;
     }
 }

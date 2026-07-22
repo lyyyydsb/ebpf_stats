@@ -18,7 +18,7 @@ filter_risk() {
   grep -E '^/' | grep -ivE \
     '^/data/user/|^/data/data/|^/storage/|^/sdcard/|^/mnt/|^/apex/|^/dev/ashmem|^/dev/null|^/dev/urandom|^/dev/__properties__' \
   | grep -iE \
-    'magisk|ksu|kernelsu|xposed|lsposed|lspd|frida|zygisk|riru|shamiko|tricky|busybox|data/adb|/su$|/su/|modules|selinux|/proc/mounts|/proc/self/maps|data/local/(tmp|su|bin|xbin)|/system/bin/su|/system/xbin/su|/sbin/su|libriruloader|XposedBridge' \
+    'magisk|kernelsu|(^|/)ksu(/|$)|xposed|lsposed|lspd|frida|zygisk|riru|shamiko|tricky|busybox|data/adb|/su$|/su/|selinux|/proc/mounts|/proc/self/maps|data/local/(tmp|su|bin|xbin)|/system/bin/su|/system/xbin/su|/sbin/su|libriruloader|XposedBridge' \
   | sort -u
 }
 
@@ -41,6 +41,8 @@ push_one() {
   if [ ! -s "$external" ] && [ -f "$risklog" ]; then
     awk -v pkg="$pkg" -v user="$user" '
     function own(p) {
+      gsub(/\/\.\//, "/", p)
+      while (index(p, "//")) gsub(/\/\//, "/", p)
       if (p ~ /^\/proc\/(self|thread-self)(\/|$)/) return 1
       if (p ~ ("^/data/(data|user/" user "|user_de/" user ")/" pkg "(/|$)")) return 1
       if (p ~ ("^/(storage/emulated/" user "|sdcard)/Android/(data|media|obb)/" pkg "(/|$)")) return 1
