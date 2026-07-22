@@ -15,3 +15,12 @@ LOG_NOISE=0
 
 PROBE_PREFIX=es_
 MAX_EVENTS=500000
+
+# 路径结果达到 512KB 后按相同结果聚合 count
+MAX_RESULT_BYTES=524288
+
+# 每个软件最多保留会话数
+MAX_SESSIONS_PER_APP=3
+
+# daemon.log 单文件上限，超过后轮转为 daemon.log.1
+MAX_DAEMON_LOG_BYTES=524288

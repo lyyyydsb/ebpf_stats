@@ -1,5 +1,4 @@
 *.apk
-!apk/EnvProbe.apk
 .gradle/
 build/
 local.properties

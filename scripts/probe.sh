@@ -6,7 +6,7 @@ P="${PROBE_PREFIX:-es_}"
 ENABLE_CONN="${ENABLE_CONN:-1}"
 ENABLE_DEATH="${ENABLE_DEATH:-0}"
 
-PROBE_NAMES="${P}access ${P}stat ${P}statx ${P}open ${P}rlink ${P}conn ${P}exit ${P}tgkill ${P}kill"
+PROBE_NAMES="${P}access ${P}access_ret ${P}stat ${P}stat_ret ${P}statx ${P}statx_ret ${P}open ${P}open_ret ${P}rlink ${P}rlink_ret ${P}conn ${P}exit ${P}tgkill ${P}kill"
 
 probe_rm() {
   if [ -d "$T/events/kprobes" ]; then
@@ -15,6 +15,9 @@ probe_rm() {
     done
   fi
   for n in $PROBE_NAMES; do
+    echo "-:$n" > "$T/kprobe_events" 2>/dev/null
+  done
+  for n in ${P}access ${P}access_ret ${P}stat ${P}stat_ret ${P}statx ${P}statx_ret ${P}open ${P}open_ret ${P}rlink ${P}rlink_ret ${P}conn ${P}exit ${P}tgkill ${P}kill; do
     echo "-:$n" > "$T/kprobe_events" 2>/dev/null
   done
   sleep 0.1
@@ -43,6 +46,24 @@ probe_add_one() {
   return 1
 }
 
+probe_add_ret() {
+  name="$1"
+  func="$2"
+  line="r:$name $func ret=\$retval:s64"
+  echo "$line" >> "$T/kprobe_events" 2>/dev/null || return 1
+  grep -q "$name" "$T/kprobe_events" 2>/dev/null || return 1
+  i=0
+  while [ $i -lt 50 ]; do
+    if [ -f "$T/events/kprobes/$name/enable" ]; then
+      echo 1 > "$T/events/kprobes/$name/enable"
+      return 0
+    fi
+    i=$((i + 1))
+    usleep 20000 2>/dev/null || sleep 0.02
+  done
+  return 1
+}
+
 probe_setup() {
   # 关键：先关 tracing，再动探针；期间 set_event_pid 保持由调用方设置
   echo 0 > "$T/tracing_on" 2>/dev/null
@@ -53,22 +74,28 @@ probe_setup() {
   ok=0
   first=1
 
-  if probe_add_one "${P}access" "do_faccessat path=+0(%x1):string" "$first"; then
+  if probe_add_one "${P}access" "do_faccessat path=+0(%x1):string mode=%x2:s32" "$first"; then
     first=0; ok=$((ok + 1))
+    probe_add_ret "${P}access_ret" "do_faccessat" && ok=$((ok + 1))
   fi
   if probe_add_one "${P}stat" "vfs_fstatat path=+0(%x1):string" "$first"; then
     first=0; ok=$((ok + 1))
+    probe_add_ret "${P}stat_ret" "vfs_fstatat" && ok=$((ok + 1))
   fi
   if probe_add_one "${P}statx" "vfs_statx path=+0(%x1):string" "$first"; then
     first=0; ok=$((ok + 1))
+    probe_add_ret "${P}statx_ret" "vfs_statx" && ok=$((ok + 1))
   fi
-  if probe_add_one "${P}open" "do_sys_openat2 path=+0(%x1):string" "$first"; then
+  if probe_add_one "${P}open" "do_sys_openat2 path=+0(%x1):string flags=+0(%x2):u64" "$first"; then
     first=0; ok=$((ok + 1))
+    probe_add_ret "${P}open_ret" "do_sys_openat2" && ok=$((ok + 1))
   fi
   if probe_add_one "${P}rlink" "do_readlinkat path=+0(%x1):string" "$first"; then
     first=0; ok=$((ok + 1))
+    probe_add_ret "${P}rlink_ret" "do_readlinkat" && ok=$((ok + 1))
   elif probe_add_one "${P}rlink" "vfs_readlink path=+0(%x0):string" "$first"; then
     first=0; ok=$((ok + 1))
+    probe_add_ret "${P}rlink_ret" "vfs_readlink" && ok=$((ok + 1))
   fi
 
   if [ "$ENABLE_CONN" = "1" ]; then

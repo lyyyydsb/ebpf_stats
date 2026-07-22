@@ -27,27 +27,9 @@ for s in daemon probe cleanup ctl check_status; do
     done
   fi
 done
-chmod 755 "$MODDIR/scripts"/*.sh "$MODDIR/service.sh" 2>/dev/null
+chmod 755 "$MODDIR/scripts"/*.sh "$MODDIR/service.sh" "$MODDIR/bin/file_monitor" 2>/dev/null
 
-# 若未安装 EnvProbe，开机补装
-if ! pm path com.envprobe >/dev/null 2>&1; then
-  APK="$MODDIR/apk/EnvProbe.apk"
-  if [ -f "$APK" ]; then
-    echo "install EnvProbe from $APK ..."
-    cp -f "$APK" /data/local/tmp/EnvProbe.apk
-    chmod 644 /data/local/tmp/EnvProbe.apk
-    pm install -r -t -g /data/local/tmp/EnvProbe.apk 2>&1 || \
-      pm install -r -t /data/local/tmp/EnvProbe.apk 2>&1 || \
-      /system/bin/pm install -r -t /data/local/tmp/EnvProbe.apk 2>&1 || \
-      cmd package install -r -t /data/local/tmp/EnvProbe.apk 2>&1 || true
-    pm path com.envprobe 2>&1 || true
-  else
-    echo "APK missing: $APK"
-    ls -la "$MODDIR" "$MODDIR/apk" 2>&1 || true
-  fi
-else
-  echo "EnvProbe already installed: $(pm path com.envprobe)"
-fi
+echo "KernelSU WebUI: $MODDIR/webroot/index.html"
 
 # 杀旧 daemon
 for p in $(ls /proc 2>/dev/null | grep '^[0-9]*$'); do

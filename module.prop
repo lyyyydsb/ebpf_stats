@@ -1,6 +1,6 @@
 id=ebpf_stats
-name=eBPF Stats + EnvProbe
-version=v1.5.5
-versionCode=155
+name=eBPF Stats WebUI
+version=v1.7.4
+versionCode=174
 author=aether
-description=作用域 App kprobe 统计(compact 风险明细+业务合并) + 自动安装 EnvProbe 联动复扫。数据在模块 ebpf_statistics/。
+description=内核级 App 路径返回值与 VFS 权限统计，支持风险分组、折叠和报告导出。

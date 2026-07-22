@@ -59,6 +59,9 @@ LOG_NOISE=0
 PROBE_PREFIX=es_
 ALLOWED_USERS=0
 MAX_EVENTS=500000
+MAX_RESULT_BYTES=524288
+MAX_SESSIONS_PER_APP=3
+MAX_DAEMON_LOG_BYTES=524288
 
 load_config() {
   [ -f "$CONFIG_FILE" ] || return 0
@@ -74,6 +77,9 @@ load_config() {
       PROBE_PREFIX) PROBE_PREFIX="$v" ;;
       ALLOWED_USERS) ALLOWED_USERS="$v" ;;
       MAX_EVENTS) MAX_EVENTS="$v" ;;
+      MAX_RESULT_BYTES) MAX_RESULT_BYTES="$v" ;;
+      MAX_SESSIONS_PER_APP) MAX_SESSIONS_PER_APP="$v" ;;
+      MAX_DAEMON_LOG_BYTES) MAX_DAEMON_LOG_BYTES="$v" ;;
     esac
   done < "$CONFIG_FILE"
 }
@@ -90,7 +96,13 @@ user_allowed() {
   return 1
 }
 
-dlog() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_DAEMON"; }
+dlog() {
+  size=$(wc -c < "$LOG_DAEMON" 2>/dev/null || echo 0)
+  if [ "$size" -ge "$MAX_DAEMON_LOG_BYTES" ] 2>/dev/null; then
+    mv -f "$LOG_DAEMON" "$LOG_DAEMON.1" 2>/dev/null
+  fi
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_DAEMON"
+}
 
 TRACE_DIR="/sys/kernel/tracing"
 [ -d "$TRACE_DIR" ] || TRACE_DIR="/sys/kernel/debug/tracing"
@@ -98,6 +110,75 @@ T="$TRACE_DIR"
 export TRACE_DIR T PROBE_PREFIX ENABLE_CONN ENABLE_DEATH
 # shellcheck disable=SC1090
 . "$SCRIPTS/probe.sh"
+
+BPF_DIR="$MODDIR/bin"
+BPF_BIN="$BPF_DIR/file_monitor"
+BPF_OBJ="$BPF_DIR/file_monitor.bpf.o"
+BPF_LIB="$MODDIR/lib"
+BPF_LOG="$RUN_DIR/bpf.log"
+BPF_PIDFILE="$RUN_DIR/bpf.pid"
+BPF_LAST_PIDS=""
+BPF_LINES=0
+
+bpf_stop() {
+  p=$(cat "$BPF_PIDFILE" 2>/dev/null)
+  if [ -n "$p" ]; then
+    kill "$p" 2>/dev/null
+    for child in $(ps -A -o PID,PPID 2>/dev/null | awk -v p="$p" '$2==p{print $1}'); do
+      kill "$child" 2>/dev/null
+    done
+  fi
+  rm -f "$BPF_PIDFILE"
+  BPF_LAST_PIDS=""
+  BPF_LINES=0
+}
+
+bpf_start() {
+  targets="$1"
+  bpf_stop
+  [ -x "$BPF_BIN" ] || { dlog "BPF binary missing: $BPF_BIN"; return 1; }
+  [ -f "$BPF_OBJ" ] || { dlog "BPF object missing: $BPF_OBJ"; return 1; }
+  : > "$BPF_LOG"
+  (
+    cd "$BPF_DIR" || exit 1
+    LD_LIBRARY_PATH="$BPF_LIB" ./file_monitor --vfs-only $targets |
+      MODDIR="$MODDIR" sh "$SCRIPTS/bpf_collect.sh" >> "$BPF_LOG" 2>&1
+  ) &
+  echo $! > "$BPF_PIDFILE"
+  BPF_LAST_PIDS="$targets"
+  dlog "BPF VFS monitor started pids=[$targets] pid=$(cat "$BPF_PIDFILE")"
+}
+
+drain_bpf() {
+  [ -f "$BPF_LOG" ] || return 0
+  total=$(wc -l < "$BPF_LOG" 2>/dev/null || echo 0)
+  case "$total" in *[!0-9]*) return 0 ;; esac
+  [ "$total" -gt "$BPF_LINES" ] || return 0
+  start=$((BPF_LINES + 1))
+  BPF_LINES=$total
+  awk -v start="$start" -v tidmap="$RUN_DIR/tidmap" -v rundir="$RUN_DIR" -v ts="$(date '+%Y-%m-%d %H:%M:%S')" '
+  BEGIN {
+    while ((getline L < tidmap) > 0) {
+      split(L, a, " ")
+      if (a[1] != "") { pkg[a[1]]=a[2]; user[a[1]]=a[3] }
+    }
+    close(tidmap)
+  }
+  NR < start || $1 != "VFS" { next }
+  {
+    tgid=""
+    for (i=1;i<=NF;i++) if ($i ~ /^tgid=/) { tgid=$i; sub(/^tgid=/, "", tgid) }
+    if (tgid == "" || !(tgid in pkg)) next
+    key=pkg[tgid] "_u" user[tgid]
+    sf=rundir "/sess_" key
+    sess=""
+    while ((getline sl < sf) > 0) if (index(sl, "sess=") == 1) sess=substr(sl, 6)
+    close(sf)
+    if (sess == "") next
+    print "[" ts "] " $0 >> sess "/vfs_events.log"
+    close(sess "/vfs_events.log")
+  }' "$BPF_LOG" 2>/dev/null
+}
 
 load_scope_rules() {
   : > "$RUN_DIR/scope_rules"
@@ -203,11 +284,24 @@ collect_tids() {
   echo $tids
 }
 
+prune_sessions() {
+  dir="$1"
+  keep="$MAX_SESSIONS_PER_APP"
+  case "$keep" in *[!0-9]*|'') keep=3 ;; esac
+  n=0
+  for old in $(ls -dt "$dir"/session_* 2>/dev/null); do
+    n=$((n + 1))
+    [ "$n" -le "$keep" ] && continue
+    rm -rf "$old"
+  done
+}
+
 start_session() {
   pkg="$1"; user="$2"; pids="$3"
   key="${pkg}_u${user}"
   sdir="$STATS_ROOT/${pkg}_u${user}"
   mkdir -p "$sdir"
+  prune_sessions "$sdir"
   ts=$(date '+%Y%m%d_%H%M%S')
   sess="$sdir/session_${ts}"
   mkdir -p "$sess"
@@ -221,6 +315,8 @@ start_session() {
   # 兼容旧字段名：events.log 作为风险日志的软说明
   echo "see events_risk.log (compact)" > "$sess/events.log"
   : > "$sess/biz_counts.txt"
+  : > "$sess/path_results.log"
+  : > "$sess/vfs_events.log"
   echo "0" > "$RUN_DIR/evt_$key"
   echo "0" > "$RUN_DIR/evt_risk_$key"
   {
@@ -313,6 +409,8 @@ gen_session_stats() {
   risklog="$sess/events_risk.log"
   [ -f "$risklog" ] || risklog="$sess/events.log"
   bizf="$sess/biz_counts.txt"
+  resultf="$sess/path_results.log"
+  vfsf="$sess/vfs_events.log"
   uniqf="$sess/unique_risk.txt"
   uniqextf="$sess/unique_external.txt"
   sockf="$sess/socks.txt"
@@ -403,6 +501,15 @@ gen_session_stats() {
     biz_other=$(awk -F'\t' '$1=="OTHER"{s+=$2} END{print s+0}' "$bizf")
   fi
   biz_total=$((biz_open + biz_stat + biz_acc + biz_conn + biz_other))
+  vfs_total=0
+  [ -f "$vfsf" ] && vfs_total=$(awk '{for(i=1;i<=NF;i++) if($i ~ /^total=/){sub(/^total=/,"",$i); s+=$i}} END{print s+0}' "$vfsf")
+  result_success=0; result_not_found=0; result_denied=0; result_error=0
+  if [ -f "$resultf" ]; then
+    result_success=$(awk '/state=SUCCESS/{n=1;for(i=1;i<=NF;i++)if($i~/^count=/){sub(/^count=/,"",$i);n=$i+0}c+=n}END{print c+0}' "$resultf")
+    result_not_found=$(awk '/state=NOT_FOUND/{n=1;for(i=1;i<=NF;i++)if($i~/^count=/){sub(/^count=/,"",$i);n=$i+0}c+=n}END{print c+0}' "$resultf")
+    result_denied=$(awk '/state=DENIED/{n=1;for(i=1;i<=NF;i++)if($i~/^count=/){sub(/^count=/,"",$i);n=$i+0}c+=n}END{print c+0}' "$resultf")
+    result_error=$(awk '/state=ERROR/{n=1;for(i=1;i<=NF;i++)if($i~/^count=/){sub(/^count=/,"",$i);n=$i+0}c+=n}END{print c+0}' "$resultf")
+  fi
   risk_lines=$((nstat + nacc + nopen + nconn))
 
   {
@@ -415,6 +522,8 @@ gen_session_stats() {
     echo "RISK_OPEN=$nopen RISK_STAT=$nstat RISK_ACCESS=$nacc RISK_CONN=$nconn"
     echo "external_paths=$nexternal risk_paths=$nrisk maps=$nmaps root_marks=$nroot"
     echo "BIZ_OPEN=$biz_open BIZ_STAT=$biz_stat BIZ_ACCESS=$biz_acc BIZ_CONN=$biz_conn BIZ_OTHER=$biz_other BIZ_TOTAL=$biz_total"
+    echo "VFS_PERMISSION_TOTAL=$vfs_total"
+    echo "PATH_SUCCESS=$result_success PATH_NOT_FOUND=$result_not_found PATH_DENIED=$result_denied PATH_ERROR=$result_error"
     echo "--- 风险路径 TOP ---"
     sed -n '1,50p' "$uniqf"
     echo "--- Socket TOP ---"
@@ -423,6 +532,8 @@ gen_session_stats() {
     echo "本目录: $sess"
     echo "  events_risk.log  外部路径事件（兼容旧文件名）"
     echo "  biz_counts.txt   自身私有路径按类型计数"
+    echo "  vfs_events.log   内核 security_inode_permission 聚合事件"
+    echo "  path_results.log 目标 App 实际系统调用返回结果"
     echo "  paths_external.txt 目标实际探测的全部外部路径"
     echo "  paths_risk.txt   过滤后的风险路径(给 EnvProbe)"
     echo "  unique_external.txt 外部路径去重"
@@ -439,6 +550,10 @@ gen_session_stats() {
   cp -f "$extpathsf" "$sdir/latest_paths_external.txt" 2>/dev/null
   cp -f "$pathsf" "$sdir/latest_paths_risk.txt" 2>/dev/null
   cp -f "$sockf" "$sdir/latest_socks.txt" 2>/dev/null
+  rm -f "$sdir/latest_path_results.txt" "$sdir/latest_vfs_events.txt"
+  ln -s "${sess##*/}/path_results.log" "$sdir/latest_path_results.txt" 2>/dev/null
+  ln -s "${sess##*/}/vfs_events.log" "$sdir/latest_vfs_events.txt" 2>/dev/null
+  prune_sessions "$sdir"
 
   push_to_envprobe "$pkg" "$user" "$sess" "$extpathsf" "$pathsf"
 }
@@ -558,6 +673,7 @@ refresh_filter() {
   all_pids=$(echo $all_pids)
 
   if [ -z "$all_pids" ]; then
+    [ -n "$BPF_LAST_PIDS" ] && bpf_stop
     if [ "$PROBES_LIVE" = "1" ]; then
       probe_off
       PROBES_LIVE=0
@@ -568,6 +684,7 @@ refresh_filter() {
   fi
 
   if [ "$PROBES_LIVE" = "1" ] && [ "$all_pids" = "$LAST_PIDS" ]; then
+    [ "$BPF_LAST_PIDS" = "$all_pids" ] || bpf_start "$all_pids"
     return 0
   fi
 
@@ -592,6 +709,68 @@ refresh_filter() {
     dlog "update pids tids=$ntid set_event_pid=$np"
   fi
   LAST_PIDS="$all_pids"
+  [ "$BPF_LAST_PIDS" = "$all_pids" ] || bpf_start "$all_pids"
+}
+
+compact_result_file() {
+  file="$1"
+  [ -f "$file" ] || return 0
+  size=$(wc -c < "$file" 2>/dev/null || echo 0)
+  [ "$size" -ge "$MAX_RESULT_BYTES" ] 2>/dev/null || return 0
+  tmp="$file.compact"
+  awk '
+  {
+    line=$0
+    count=1
+    if (match(line, / count=[0-9]+$/)) {
+      count=substr(line, RSTART+7)+0
+      line=substr(line, 1, RSTART-1)
+    }
+    if (line ~ /^\[[0-9]/) {
+      op=line
+      sub(/^\[[^]]+\]\[/, "", op)
+      sub(/\].*/, "", op)
+      rest=line
+      sub(/^\[[^]]+\]\[[^]]+\] /, "", rest)
+      split_at=index(rest, "  ")
+      if (split_at > 0) line="[" op "] " substr(rest, split_at+2)
+    }
+    totals[line] += count
+  }
+  END { for (line in totals) print line " count=" totals[line] }
+  ' "$file" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file"
+  size=$(wc -c < "$file" 2>/dev/null || echo 0)
+  if [ "$size" -ge "$MAX_RESULT_BYTES" ] 2>/dev/null; then
+    tail -n 2000 "$file" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file"
+  fi
+}
+
+cap_text_file() {
+  file="$1"; limit="$2"; lines="$3"
+  [ -f "$file" ] || return 0
+  size=$(wc -c < "$file" 2>/dev/null || echo 0)
+  [ "$size" -ge "$limit" ] 2>/dev/null || return 0
+  tail -n "$lines" "$file" > "$file.cap" 2>/dev/null && mv -f "$file.cap" "$file"
+}
+
+maintain_storage() {
+  cap_text_file "$LOG_DAEMON.1" "$MAX_DAEMON_LOG_BYTES" 3000
+  for appdir in "$STATS_ROOT"/*_u*; do
+    [ -d "$appdir" ] || continue
+    prune_sessions "$appdir"
+    for sess in "$appdir"/session_*; do
+      [ -d "$sess" ] || continue
+      compact_result_file "$sess/path_results.log"
+      cap_text_file "$sess/events_risk.log" 524288 3000
+      cap_text_file "$sess/vfs_events.log" 262144 2000
+    done
+    latest=$(ls -dt "$appdir"/session_* 2>/dev/null | sed -n '1p')
+    if [ -d "$latest" ]; then
+      rm -f "$appdir/latest_path_results.txt" "$appdir/latest_vfs_events.txt"
+      ln -s "${latest##*/}/path_results.log" "$appdir/latest_path_results.txt" 2>/dev/null
+      ln -s "${latest##*/}/vfs_events.log" "$appdir/latest_vfs_events.txt" 2>/dev/null
+    fi
+  done
 }
 
 # ---------- 热路径（已用真机 trace 验证 awk 可写 200+ 条）----------
@@ -682,14 +861,21 @@ drain_trace() {
       if (sess == "") next
       riskf[key] = sess "/events_risk.log"
       bizf[key] = sess "/biz_counts.txt"
+      resultf[key] = sess "/path_results.log"
       cntf[key] = rundir "/evt_" key
     }
 
     ts=""
     if (match($0, /[0-9]+\.[0-9]+:/)) ts = substr($0, RSTART, RLENGTH-1)
 
+    isret=0
     op=""
-    if (index($0, P "statx") || index($0, P "stat")) op="STAT"
+    if (index($0, P "access_ret")) { op="ACCESS"; isret=1 }
+    else if (index($0, P "statx_ret")) { op="STAT"; isret=1 }
+    else if (index($0, P "stat_ret")) { op="STAT"; isret=1 }
+    else if (index($0, P "open_ret")) { op="OPEN"; isret=1 }
+    else if (index($0, P "rlink_ret")) { op="RLINK"; isret=1 }
+    else if (index($0, P "statx") || index($0, P "stat")) op="STAT"
     else if (index($0, P "access")) op="ACCESS"
     else if (index($0, P "open")) op="OPEN"
     else if (index($0, P "rlink")) op="RLINK"
@@ -697,6 +883,41 @@ drain_trace() {
     else next
 
     comm=$1
+
+    if (isret) {
+      pending_key=pid SUBSEP op
+      path=pending[pending_key]
+      delete pending[pending_key]
+      mode=pending_mode[pending_key]+0
+      flags=pending_flags[pending_key]+0
+      delete pending_mode[pending_key]
+      delete pending_flags[pending_key]
+      if (path == "") next
+      ret=0
+      if (match($0, /ret=-?[0-9]+/)) ret=substr($0, RSTART+4)+0
+      if (ret >= 0) state="SUCCESS"
+      else if (ret == -2) state="NOT_FOUND"
+      else if (ret == -13 || ret == -1) state="DENIED"
+      else state="ERROR"
+      capability=state
+      if (state == "SUCCESS") {
+        if (op == "STAT") capability="EXISTS"
+        else if (op == "RLINK") capability="READABLE"
+        else if (op == "ACCESS") {
+          if (mode == 0) capability="EXISTS"
+          else if (mode == 4 || mode == 5 || mode == 6 || mode == 7) capability="READABLE"
+          else capability="ACCESSIBLE"
+        } else if (op == "OPEN") {
+          accmode=flags % 4
+          if (int(flags / 2097152) % 2 == 1) capability="EXISTS"
+          else if (accmode == 0 || accmode == 2) capability="READABLE"
+          else capability="WRITABLE"
+        }
+      }
+      print "[" op "] " path " state=" state " capability=" capability " ret=" ret " count=1" >> resultf[key]
+      n[key]++
+      next
+    }
 
     if (op == "CONN") {
       family=""; ab=""; su=""
@@ -728,6 +949,9 @@ drain_trace() {
     path=""
     if (match($0, /path="[^"]*"/)) path=substr($0, RSTART+6, RLENGTH-7)
     if (path == "" || path !~ /^\// || path == "(fault)") next
+    pending[pid SUBSEP op] = path
+    if (match($0, /mode=-?[0-9]+/)) pending_mode[pid SUBSEP op]=substr($0, RSTART+5)+0
+    if (match($0, /flags=[0-9]+/)) pending_flags[pid SUBSEP op]=substr($0, RSTART+6)+0
     if (noise != "1") {
       if (path=="/dev/null" || path=="/dev/urandom" || path=="/dev/zero") next
     }
@@ -813,6 +1037,7 @@ cleanup_all() {
   done
   probe_off
   probe_rm
+  bpf_stop
   release_lock
   exit 0
 }
@@ -834,11 +1059,16 @@ echo 0 > "$T/tracing_on" 2>/dev/null
 echo > "$T/trace" 2>/dev/null
 
 last_discover=0
+last_maintain=0
 while true; do
   lp=$(cat "$LOCKFILE/pid" 2>/dev/null)
   [ -n "$lp" ] && [ "$lp" != "$$" ] && exit 0
 
   now=$(date +%s)
+  if [ $((now - last_maintain)) -ge 30 ] || [ "$last_maintain" -eq 0 ]; then
+    maintain_storage
+    last_maintain=$now
+  fi
   if [ $((now - last_discover)) -ge "$POLL_SEC" ] || [ "$last_discover" -eq 0 ]; then
     load_config
     rebuild
@@ -846,6 +1076,7 @@ while true; do
     last_discover=$now
   fi
 
+  drain_bpf
   drain_trace
 
   if [ "$PROBES_LIVE" = "1" ]; then
